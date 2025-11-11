@@ -21,6 +21,19 @@ export function profileImageUrlUpload () {
       const loggedInUser = security.authenticatedUsers.get(req.cookies.token)
       if (loggedInUser) {
         try {
+          const urlObject = new URL(url)
+          const hostname = urlObject.hostname.toLowerCase()
+          if (hostname === 'localhost' || 
+            hostname === '127.0.0.1' || 
+            hostname === '::1' || 
+            hostname === '169.254.169.254' ||
+            hostname.startsWith('169.254.') ||
+            hostname.endsWith('.local') || 
+            hostname.match(/^192\.168\.\d{1,3}\.\d{1,3}$/) || 
+            hostname.match(/^10\.\d{1,3}\.\d{1,3}\.\d{1,3}$/) || 
+            hostname.match(/^172\.(1[6-9]|2\d|3[0-1])\.\d{1,3}\.\d{1,3}$/)) {
+          throw new Error('Invalid URL: Local or private addresses are not allowed')
+        }
           const response = await fetch(url)
           if (!response.ok || !response.body) {
             throw new Error('url returned a non-OK status code or an empty body')
