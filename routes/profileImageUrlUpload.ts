@@ -7,6 +7,8 @@ import fs from 'node:fs'
 import { Readable } from 'node:stream'
 import { finished } from 'node:stream/promises'
 import { type Request, type Response, type NextFunction } from 'express'
+import dns from 'node:dns'
+import net from 'node:net'
 
 import * as security from '../lib/insecurity'
 import { UserModel } from '../models/user'
@@ -20,59 +22,91 @@ export function profileImageUrlUpload () {
       if (url.match(/(.)*solve\/challenges\/server-side(.)*/) !== null) req.app.locals.abused_ssrf_bug = true
       const loggedInUser = security.authenticatedUsers.get(req.cookies.token)
       if (loggedInUser) {
-        // Validate URL format and protocol
-        let urlObject
+        const isPrivateAddress = (addr: string) => {
+          // handle IPv4-mapped IPv6 like ::ffff:192.168.0.1
+          if (addr.startsWith('::ffff:')) addr = addr.split('::ffff:')[1]
+          const ver = net.isIP(addr)
+          if (ver === 4) {
+            const parts = addr.split('.').map(Number)
+            if (parts[0] === 10) return true
+            if (parts[0] === 127) return true
+            if (parts[0] === 169 && parts[1] === 254) return true
+            if (parts[0] === 172 && parts[1] >= 16 && parts[1] <= 31) return true
+            if (parts[0] === 192 && parts[1] === 168) return true
+            return false
+          } else if (ver === 6) {
+            // common IPv6 private/loopback checks
+            const lower = addr.toLowerCase()
+            if (lower === '::1') return true
+            if (lower.startsWith('fe80') || lower.startsWith('fc') || lower.startsWith('fd')) return true
+            return false
+          }
+          return false
+        }
+
+        const validateUrlHostIsPublic = async (targetUrl: string) => {
+          let parsed: URL
+          try {
+            parsed = new URL(targetUrl)
+          } catch (err) {
+            throw new Error('Invalid URL')
+          }
+          if (!['http:', 'https:'].includes(parsed.protocol)) throw new Error('Only http(s) URLs are allowed')
+          const hostname = parsed.hostname
+          if (!hostname || hostname === 'localhost') throw new Error('Localhost is not allowed')
+          // resolve DNS and ensure none of the addresses are private
+          const records = await dns.promises.lookup(hostname, { all: true }).catch(() => { throw new Error('DNS lookup failed') })
+          if (!records || records.length === 0) throw new Error('DNS lookup returned no addresses')
+          for (const r of records) {
+            if (isPrivateAddress(r.address)) throw new Error('Resolved address is in a private range')
+          }
+          return parsed
+        }
+
         try {
-          urlObject = new URL(url)
-        } catch (error) {
-          res.status(400).json({ error: 'Invalid URL format' })
-          return
-        }
+          // validate the provided URL's host first
+          const parsed = await validateUrlHostIsPublic(url)
 
-        // Only allow http and https protocols
-        if (urlObject.protocol !== 'http:' && urlObject.protocol !== 'https:') {
-          res.status(400).json({ error: 'Only HTTP and HTTPS protocols are allowed' })
-          return
-        }
-
-        const hostname = urlObject.hostname.toLowerCase()
-
-        // Comprehensive blocklist for private/internal addresses
-        const isPrivateOrLocal = 
-          hostname === 'localhost' ||
-          hostname === '127.0.0.1' ||
-          hostname === '::1' ||
-          hostname === '0.0.0.0' ||
-          hostname.startsWith('127.') ||
-          hostname.startsWith('10.') ||
-          hostname.startsWith('192.168.') ||
-          hostname.startsWith('169.254.') ||
-          hostname.match(/^172\.(1[6-9]|2\d|3[0-1])\./) ||
-          hostname.endsWith('.local') ||
-          hostname.endsWith('.localhost')
-
-        if (isPrivateOrLocal) {
-          res.status(400).json({ error: 'Access to private or local addresses is not allowed' })
-          return
-        }
-
-        // Now proceed with fetch
-        try {
-          const response = await fetch(url)
+          const response = await fetch(url, { redirect: 'follow' })
           if (!response.ok || !response.body) {
             throw new Error('url returned a non-OK status code or an empty body')
           }
-          const ext = ['jpg', 'jpeg', 'png', 'svg', 'gif'].includes(url.split('.').slice(-1)[0].toLowerCase()) ? url.split('.').slice(-1)[0].toLowerCase() : 'jpg'
+
+          // ensure the final fetch location (after redirects) is also public
+          const finalUrl = response.url || parsed.href
+          await validateUrlHostIsPublic(finalUrl)
+
+          const contentType = response.headers.get('content-type') || ''
+          if (!contentType.startsWith('image/')) {
+            throw new Error('URL did not return an image content-type')
+          }
+
+          // pick extension from content-type with fallback to url path
+          let ext = 'jpg'
+          if (contentType.includes('image/png')) ext = 'png'
+          else if (contentType.includes('image/svg')) ext = 'svg'
+          else if (contentType.includes('image/gif')) ext = 'gif'
+          else if (contentType.includes('jpeg') || contentType.includes('jpg')) ext = 'jpg'
+          else {
+            const pathExt = parsed.pathname.split('.').slice(-1)[0].toLowerCase()
+            if (['jpg', 'jpeg', 'png', 'svg', 'gif'].includes(pathExt)) ext = pathExt
+          }
+
           const fileStream = fs.createWriteStream(`frontend/dist/frontend/assets/public/images/uploads/${loggedInUser.data.id}.${ext}`, { flags: 'w' })
           await finished(Readable.fromWeb(response.body as any).pipe(fileStream))
-          await UserModel.findByPk(loggedInUser.data.id).then(async (user: UserModel | null) => { 
-            return await user?.update({ profileImage: `/assets/public/images/uploads/${loggedInUser.data.id}.${ext}` }) 
-          }).catch((error: Error) => { next(error) })
+          await UserModel.findByPk(loggedInUser.data.id).then(async (user: UserModel | null) => { return await user?.update({ profileImage: `/assets/public/images/uploads/${loggedInUser.data.id}.${ext}` }) }).catch((error: Error) => { next(error) })
         } catch (error) {
-          // For network/fetch errors, do NOT use the URL directly
-          // Just return an error instead
-          res.status(500).json({ error: 'Failed to retrieve image from URL' })
-          return
+          try {
+            // If fetch or validation fails, do NOT perform a server-side fetch.
+            // Keep the previous fallback behavior of storing the URL so the client may load it,
+            // but do not attempt to fetch unsafe/internal addresses on the server.
+            const user = await UserModel.findByPk(loggedInUser.data.id)
+            await user?.update({ profileImage: url })
+            logger.warn(`Error retrieving user profile image: ${utils.getErrorMessage(error)}; using image link directly`)
+          } catch (error) {
+            next(error)
+            return
+          }
         }
       } else {
         next(new Error('Blocked illegal activity by ' + req.socket.remoteAddress))
