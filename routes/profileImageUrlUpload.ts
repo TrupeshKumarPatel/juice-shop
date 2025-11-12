@@ -102,7 +102,7 @@ export function profileImageUrlUpload () {
           await validateUrlHostIsPublic(finalUrl)
 
           // Validate content type is an image
-          const contentType = response.headers.get('content-type') || ''
+          const contentType = response.headers.get('content-type') ?? ''
           if (!contentType.startsWith('image/')) {
             throw new Error('URL did not return an image content-type')
           }

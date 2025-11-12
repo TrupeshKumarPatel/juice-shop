@@ -15,7 +15,7 @@ export function trackOrder () {
     const id = !utils.isChallengeEnabled(challenges.reflectedXssChallenge) ? String(req.params.id).replace(/[^\w-]+/g, '') : utils.trunc(req.params.id, 60)
 
     challengeUtils.solveIf(challenges.reflectedXssChallenge, () => { return utils.contains(id, '<iframe src="javascript:alert`xss`)">') })
-    
+
     // Fixed: Use direct field matching instead of $where with string interpolation
     db.ordersCollection.find({ orderId: id }).then((order: any) => {
       const result = utils.queryResultToJson(order)
