@@ -91,7 +91,8 @@ export function profileImageUrlUpload () {
           // Validate the provided URL's host before fetching
           const parsed = await validateUrlHostIsPublic(url)
 
-          const response = await fetch(url, { redirect: 'follow' })
+          // Use the validated parsed URL instead of the raw user input
+          const response = await fetch(parsed.href, { redirect: 'follow' })
           if (!response.ok || !response.body) {
             throw new Error('url returned a non-OK status code or an empty body')
           }
@@ -121,17 +122,10 @@ export function profileImageUrlUpload () {
           await finished(Readable.fromWeb(response.body as any).pipe(fileStream))
           await UserModel.findByPk(loggedInUser.data.id).then(async (user: UserModel | null) => { return await user?.update({ profileImage: `/assets/public/images/uploads/${loggedInUser.data.id}.${ext}` }) }).catch((error: Error) => { next(error) })
         } catch (error) {
-          try {
-            // If fetch or validation fails, do NOT perform a server-side fetch.
-            // Keep the previous fallback behavior of storing the URL so the client may load it,
-            // but do not attempt to fetch unsafe/internal addresses on the server.
-            const user = await UserModel.findByPk(loggedInUser.data.id)
-            await user?.update({ profileImage: url })
-            logger.warn(`Error retrieving user profile image: ${utils.getErrorMessage(error)}; using image link directly`)
-          } catch (error) {
-            next(error)
-            return
-          }
+          // Do not store unvalidated URLs - return error instead
+          logger.error(`Failed to fetch and validate profile image: ${utils.getErrorMessage(error)}`)
+          next(new Error('Unable to fetch profile image from provided URL. Please ensure the URL is valid and publicly accessible.'))
+          return
         }
       } else {
         next(new Error('Blocked illegal activity by ' + req.socket.remoteAddress))
