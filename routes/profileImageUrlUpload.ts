@@ -98,7 +98,7 @@ export function profileImageUrlUpload () {
           }
 
           // Validate the final URL after redirects to prevent DNS rebinding
-          const finalUrl = response.url || parsed.href
+          const finalUrl = response.url ?? parsed.href
           await validateUrlHostIsPublic(finalUrl)
 
           // Validate content type is an image
