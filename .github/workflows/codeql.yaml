@@ -1,13 +1,14 @@
-name: Security — CodeQL
+name: "Security - CodeQL"
 
 on:
   push:
     branches: [ master ]
-  pull_request: 
+  pull_request:
 
 permissions:
+  actions: read
   contents: read
-  security-events: write # needed to upload results to Code scanning
+  security-events: write
 
 jobs:
   analyze:
@@ -17,19 +18,24 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # language: [ 'javascript', 'python', 'ccpp', 'csharp', 'go', 'java-kotlin', 'ruby', 'swift']
-        language: ['javascript']
+        language: [ 'javascript-typescript' ]
+    
     steps:
-      - name: Checkout
+      - name: Checkout repository
         uses: actions/checkout@v4
+      
       - name: Initialize CodeQL
         uses: github/codeql-action/init@v3
         with:
           languages: ${{ matrix.language }}
-          # queries: security-extended,security-and-quality # optional suites
-      # For compiled languages, try Autobuild first (ignored for script languages)
+          queries: security-extended
+          config: |
+            paths-ignore:
+              - 'data/static/codefixes'
+      
       - name: Autobuild
         uses: github/codeql-action/autobuild@v3
+      
       - name: Perform CodeQL Analysis
         uses: github/codeql-action/analyze@v3
         with:
