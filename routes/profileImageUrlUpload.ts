@@ -1,3 +1,18 @@
+/*
+ * Copyright (c) 2014-2025 Bjoern Kimminich & the OWASP Juice Shop contributors.
+ * SPDX-License-Identifier: MIT
+ */
+
+import fs from 'node:fs'
+import { Readable } from 'node:stream'
+import { finished } from 'node:stream/promises'
+import { type Request, type Response, type NextFunction } from 'express'
+
+import * as security from '../lib/insecurity'
+import { UserModel } from '../models/user'
+import * as utils from '../lib/utils'
+import logger from '../lib/logger'
+
 export function profileImageUrlUpload () {
   return async (req: Request, res: Response, next: NextFunction) => {
     if (req.body.imageUrl !== undefined) {
@@ -5,31 +20,43 @@ export function profileImageUrlUpload () {
       if (url.match(/(.)*solve\/challenges\/server-side(.)*/) !== null) req.app.locals.abused_ssrf_bug = true
       const loggedInUser = security.authenticatedUsers.get(req.cookies.token)
       if (loggedInUser) {
-        // Validate URL BEFORE the try block
+        // Validate URL format and protocol
+        let urlObject
         try {
-          const urlObject = new URL(url)
-          const hostname = urlObject.hostname.toLowerCase()
-          
-          if (hostname === 'localhost' || 
-              hostname === '127.0.0.1' || 
-              hostname === '::1' || 
-              hostname === '169.254.169.254' ||
-              hostname.startsWith('169.254.') ||
-              hostname.endsWith('.local') || 
-              hostname.match(/^192\.168\.\d{1,3}\.\d{1,3}$/) || 
-              hostname.match(/^10\.\d{1,3}\.\d{1,3}\.\d{1,3}$/) || 
-              hostname.match(/^172\.(1[6-9]|2\d|3[0-1])\.\d{1,3}\.\d{1,3}$/)) {
-            // Don't throw - send error response directly
-            res.status(400).json({ error: 'Invalid URL: Local or private addresses are not allowed' })
-            return
-          }
+          urlObject = new URL(url)
         } catch (error) {
-          // Invalid URL format
           res.status(400).json({ error: 'Invalid URL format' })
           return
         }
 
-        // Now try to fetch - this is in a separate try-catch
+        // Only allow http and https protocols
+        if (urlObject.protocol !== 'http:' && urlObject.protocol !== 'https:') {
+          res.status(400).json({ error: 'Only HTTP and HTTPS protocols are allowed' })
+          return
+        }
+
+        const hostname = urlObject.hostname.toLowerCase()
+
+        // Comprehensive blocklist for private/internal addresses
+        const isPrivateOrLocal = 
+          hostname === 'localhost' ||
+          hostname === '127.0.0.1' ||
+          hostname === '::1' ||
+          hostname === '0.0.0.0' ||
+          hostname.startsWith('127.') ||
+          hostname.startsWith('10.') ||
+          hostname.startsWith('192.168.') ||
+          hostname.startsWith('169.254.') ||
+          hostname.match(/^172\.(1[6-9]|2\d|3[0-1])\./) ||
+          hostname.endsWith('.local') ||
+          hostname.endsWith('.localhost')
+
+        if (isPrivateOrLocal) {
+          res.status(400).json({ error: 'Access to private or local addresses is not allowed' })
+          return
+        }
+
+        // Now proceed with fetch
         try {
           const response = await fetch(url)
           if (!response.ok || !response.body) {
@@ -42,15 +69,10 @@ export function profileImageUrlUpload () {
             return await user?.update({ profileImage: `/assets/public/images/uploads/${loggedInUser.data.id}.${ext}` }) 
           }).catch((error: Error) => { next(error) })
         } catch (error) {
-          // Only for fetch/network errors - still use URL directly as fallback
-          try {
-            const user = await UserModel.findByPk(loggedInUser.data.id)
-            await user?.update({ profileImage: url })
-            logger.warn(`Error retrieving user profile image: ${utils.getErrorMessage(error)}; using image link directly`)
-          } catch (error) {
-            next(error)
-            return
-          }
+          // For network/fetch errors, do NOT use the URL directly
+          // Just return an error instead
+          res.status(500).json({ error: 'Failed to retrieve image from URL' })
+          return
         }
       } else {
         next(new Error('Blocked illegal activity by ' + req.socket.remoteAddress))
